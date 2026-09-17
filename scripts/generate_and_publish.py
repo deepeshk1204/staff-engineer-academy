@@ -448,7 +448,11 @@ def generate_with_retry(prompt):
 
                 response = client.models.generate_content(
                     model=model,
-                    contents=prompt
+                    contents=prompt,
+                    config={
+                        "temperature": 0.8,
+                        "response_mime_type": "application/json",
+                    },
                 )
 
                 if not response or not response.text:
