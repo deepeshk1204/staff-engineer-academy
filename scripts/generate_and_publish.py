@@ -491,6 +491,623 @@ Prioritize a complete article over additional detail.
 
 
 # ============================================================
+# GEMINI GENERATION
+# ============================================================
+
+def generate_with_retry(
+    prompt,
+    response_schema=None,
+    max_output_tokens=None,
+):
+    """
+    Generate Gemini content with model fallback and retry.
+
+    Temporary errors:
+    - 429
+    - 500
+    - 502
+    - 503
+    - 504
+
+    are retried before moving to the next model.
+    """
+
+    last_error = None
+
+
+    for model in GEMINI_MODELS:
+
+        for attempt in range(
+            1,
+            MAX_RETRIES_PER_MODEL + 1,
+        ):
+
+            try:
+
+                print(
+                    f"Calling Gemini: "
+                    f"{model} "
+                    f"(attempt "
+                    f"{attempt}/"
+                    f"{MAX_RETRIES_PER_MODEL})"
+                )
+
+
+                config_kwargs = {
+                    "temperature": 0.8,
+                }
+
+
+                if max_output_tokens is not None:
+
+                    config_kwargs[
+                        "max_output_tokens"
+                    ] = max_output_tokens
+
+
+                if response_schema is not None:
+
+                    config_kwargs[
+                        "response_mime_type"
+                    ] = "application/json"
+
+                    config_kwargs[
+                        "response_schema"
+                    ] = response_schema
+
+
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        **config_kwargs
+                    ),
+                )
+
+
+                if not response:
+
+                    raise RuntimeError(
+                        "Gemini returned an empty response."
+                    )
+
+
+                print(
+                    f"Gemini generation succeeded "
+                    f"using {model}."
+                )
+
+
+                log_finish_reason(
+                    response
+                )
+
+
+                return response
+
+
+            except errors.ServerError as exc:
+
+                last_error = exc
+
+
+                code = getattr(
+                    exc,
+                    "code",
+                    "unknown",
+                )
+
+
+                print(
+                    f"Gemini returned server error "
+                    f"{code}: {exc}"
+                )
+
+
+                if attempt < MAX_RETRIES_PER_MODEL:
+
+                    delay = 10 * (
+                        2 ** (attempt - 1)
+                    )
+
+
+                    print(
+                        f"Retrying in "
+                        f"{delay} seconds..."
+                    )
+
+
+                    time.sleep(delay)
+
+
+            except errors.APIError as exc:
+
+                last_error = exc
+
+
+                code = getattr(
+                    exc,
+                    "code",
+                    None,
+                )
+
+
+                print(
+                    f"Gemini API error "
+                    f"{code}: {exc}"
+                )
+
+
+                retryable = code in {
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                }
+
+
+                if (
+                    retryable
+                    and attempt < MAX_RETRIES_PER_MODEL
+                ):
+
+                    delay = 10 * (
+                        2 ** (attempt - 1)
+                    )
+
+
+                    print(
+                        f"Retrying in "
+                        f"{delay} seconds..."
+                    )
+
+
+                    time.sleep(delay)
+
+                else:
+
+                    break
+
+
+            except Exception as exc:
+
+                print(
+                    "Unexpected Gemini error: "
+                    f"{type(exc).__name__}: "
+                    f"{exc}"
+                )
+
+                raise
+
+
+        print(
+            f"Model {model} failed after "
+            f"{MAX_RETRIES_PER_MODEL} attempts."
+        )
+
+
+        if model != GEMINI_MODELS[-1]:
+
+            print(
+                "Trying fallback model..."
+            )
+
+
+    raise RuntimeError(
+        "All Gemini models failed."
+    ) from last_error
+
+
+# ============================================================
+# GEMINI RESPONSE DIAGNOSTICS
+# ============================================================
+
+def log_finish_reason(response):
+    """
+    Print generation finish reason when available.
+
+    This is extremely useful for diagnosing output truncation.
+    """
+
+    try:
+
+        candidates = getattr(
+            response,
+            "candidates",
+            None,
+        )
+
+
+        if not candidates:
+
+            print(
+                "Gemini finish reason: "
+                "unavailable"
+            )
+
+            return
+
+
+        candidate = candidates[0]
+
+
+        finish_reason = getattr(
+            candidate,
+            "finish_reason",
+            None,
+        )
+
+
+        print(
+            f"Gemini finish reason: "
+            f"{finish_reason}"
+        )
+
+
+        usage = getattr(
+            response,
+            "usage_metadata",
+            None,
+        )
+
+
+        if usage:
+
+            prompt_tokens = getattr(
+                usage,
+                "prompt_token_count",
+                None,
+            )
+
+
+            output_tokens = getattr(
+                usage,
+                "candidates_token_count",
+                None,
+            )
+
+
+            total_tokens = getattr(
+                usage,
+                "total_token_count",
+                None,
+            )
+
+
+            print(
+                "Gemini token usage: "
+                f"prompt={prompt_tokens}, "
+                f"output={output_tokens}, "
+                f"total={total_tokens}"
+            )
+
+
+    except Exception as exc:
+
+        print(
+            f"Could not read Gemini diagnostics: "
+            f"{exc}"
+        )
+
+
+# ============================================================
+# RESPONSE TEXT
+# ============================================================
+
+def get_response_text(response):
+    """
+    Safely extract text from a Gemini response.
+    """
+
+    text = getattr(
+        response,
+        "text",
+        None,
+    )
+
+
+    if not text:
+
+        raise ValueError(
+            "Gemini returned an empty text response."
+        )
+
+
+    return text.strip()
+
+
+# ============================================================
+# MARKDOWN CLEANUP
+# ============================================================
+
+def clean_markdown(text):
+    """
+    Remove an accidental outer Markdown fence.
+
+    We only remove a fence if the entire response appears to
+    have been wrapped in one.
+    """
+
+    text = (
+        text or ""
+    ).strip()
+
+
+    if text.startswith(
+        "```markdown"
+    ):
+
+        text = text[
+            len("```markdown"):
+        ].lstrip()
+
+
+        if text.endswith(
+            "```"
+        ):
+
+            text = text[
+                :-3
+            ].rstrip()
+
+
+    elif text.startswith(
+        "```md"
+    ):
+
+        text = text[
+            len("```md"):
+        ].lstrip()
+
+
+        if text.endswith(
+            "```"
+        ):
+
+            text = text[
+                :-3
+            ].rstrip()
+
+
+    return text.strip()
+
+
+# ============================================================
+# ARTICLE COMPLETENESS CHECK
+# ============================================================
+
+def article_looks_truncated(markdown):
+    """
+    Detect common signs that Gemini stopped before completing
+    the article.
+    """
+
+    if not markdown:
+
+        return True
+
+
+    if len(markdown) < MIN_ARTICLE_LENGTH:
+
+        return True
+
+
+    # Unclosed fenced code block.
+    if markdown.count("```") % 2 != 0:
+
+        return True
+
+
+    # Unclosed tilde fence.
+    if markdown.count("~~~") % 2 != 0:
+
+        return True
+
+
+    lines = markdown.splitlines()
+
+
+    if not lines:
+
+        return True
+
+
+    last_line = lines[-1].strip()
+
+
+    # Markdown table appears to have been cut off.
+    if (
+        last_line.startswith("|")
+        and not last_line.endswith("|")
+    ):
+
+        return True
+
+
+    # Strong indicators of an abruptly terminated generation.
+    suspicious_endings = (
+        ",",
+        ":",
+        ";",
+        "(",
+        "[",
+        "{",
+        "=",
+        "->",
+        "=>",
+        "```",
+        "|",
+    )
+
+
+    if last_line.endswith(
+        suspicious_endings
+    ):
+
+        return True
+
+
+    # A very short final sentence is suspicious if the article
+    # otherwise looks substantial.
+    words = last_line.split()
+
+
+    if (
+        len(markdown) > 3000
+        and 0 < len(words) <= 2
+    ):
+
+        return True
+
+
+    return False
+
+
+# ============================================================
+# ARTICLE GENERATION
+# ============================================================
+
+def generate_article(
+    topics,
+    history,
+):
+    """
+    Generate a complete Markdown article.
+
+    If the output appears truncated, generate it again rather
+    than attempting to repair incomplete content.
+    """
+
+    base_prompt = build_article_prompt(
+        topics,
+        history,
+    )
+
+
+    print(
+        "Generating article with Gemini..."
+    )
+
+
+    last_error = None
+
+
+    for attempt in range(
+        1,
+        MAX_ARTICLE_GENERATION_ATTEMPTS + 1,
+    ):
+
+        try:
+
+            print(
+                f"Article generation attempt "
+                f"{attempt}/"
+                f"{MAX_ARTICLE_GENERATION_ATTEMPTS}"
+            )
+
+
+            prompt = base_prompt
+
+
+            if attempt > 1:
+
+                prompt += """
+
+IMPORTANT RETRY INSTRUCTION:
+
+The previous generation was incomplete.
+
+Generate a NEW complete article.
+
+Use fewer examples and less prose if necessary.
+
+A complete conclusion is more important than additional
+detail.
+
+Do not stop until the article has a natural ending.
+"""
+
+
+            response = generate_with_retry(
+                prompt,
+                max_output_tokens=ARTICLE_MAX_OUTPUT_TOKENS,
+            )
+
+
+            markdown = clean_markdown(
+                get_response_text(
+                    response
+                )
+            )
+
+
+            print(
+                f"Generated article length: "
+                f"{len(markdown)} characters"
+            )
+
+
+            if article_looks_truncated(
+                markdown
+            ):
+
+                raise ValueError(
+                    "Generated Markdown appears "
+                    "truncated or incomplete."
+                )
+
+
+            if not re.search(
+                r"^#\s+.+",
+                markdown,
+                re.MULTILINE,
+            ):
+
+                raise ValueError(
+                    "Generated article is missing "
+                    "an H1 title."
+                )
+
+
+            print(
+                "Article completeness check passed."
+            )
+
+
+            return markdown
+
+
+        except ValueError as exc:
+
+            last_error = exc
+
+
+            print(
+                f"Article generation validation "
+                f"failed: {exc}"
+            )
+
+
+            if attempt < MAX_ARTICLE_GENERATION_ATTEMPTS:
+
+                print(
+                    "Retrying article generation..."
+                )
+
+
+                time.sleep(2)
+
+
+    raise RuntimeError(
+        "Gemini failed to produce a complete "
+        "article after "
+        f"{MAX_ARTICLE_GENERATION_ATTEMPTS} attempts."
+    ) from last_error
+
+
+
+# ============================================================
 # METADATA GENERATION
 # ============================================================
 
