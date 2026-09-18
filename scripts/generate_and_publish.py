@@ -1,3 +1,4 @@
+````python
 import json
 import os
 import re
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import requests
 from google import genai
-from google.genai import errors
+from google.genai import errors, types
 
 
 # ============================================================
@@ -18,8 +19,8 @@ DEVTO_API = "https://dev.to/api"
 DEVTO_ARTICLES = f"{DEVTO_API}/articles"
 
 # Primary + fallback models.
-# If the primary model is temporarily unavailable (503),
-# the script retries before falling back.
+# If a model is temporarily unavailable, retries happen before
+# moving to the next model.
 GEMINI_MODELS = [
     "gemini-3.8-flash",
     "gemini-3.6-flash",
@@ -32,10 +33,43 @@ MAX_HISTORY = 100
 MAX_HISTORY_FOR_PROMPT = 30
 
 MAX_RETRIES_PER_MODEL = 3
+MAX_ARTICLE_GENERATION_ATTEMPTS = 3
 
 MIN_ARTICLE_LENGTH = 1000
 TARGET_ARTICLE_MIN = 1500
 TARGET_ARTICLE_MAX = 2500
+
+
+# ============================================================
+# GEMINI STRUCTURED OUTPUT SCHEMA
+# ============================================================
+
+ARTICLE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {
+            "type": "string"
+        },
+        "description": {
+            "type": "string"
+        },
+        "tags": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "body_markdown": {
+            "type": "string"
+        }
+    },
+    "required": [
+        "title",
+        "description",
+        "tags",
+        "body_markdown"
+    ]
+}
 
 
 # ============================================================
@@ -49,6 +83,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not DEVTO_API_KEY:
     print("ERROR: DEVTO_API_KEY is missing")
     sys.exit(1)
+
 
 if not GEMINI_API_KEY:
     print("ERROR: GEMINI_API_KEY is missing")
@@ -77,36 +112,61 @@ def load_history():
     """
 
     if not HISTORY_FILE.exists():
-        print("Topic history does not exist. Starting fresh.")
+
+        print(
+            "Topic history does not exist. Starting fresh."
+        )
+
         return []
 
+
     try:
-        raw = HISTORY_FILE.read_text(encoding="utf-8").strip()
+
+        raw = HISTORY_FILE.read_text(
+            encoding="utf-8"
+        ).strip()
+
 
         if not raw:
-            print("Topic history is empty. Starting fresh.")
+
+            print(
+                "Topic history is empty. Starting fresh."
+            )
+
             return []
+
 
         data = json.loads(raw)
 
+
         if not isinstance(data, list):
+
             print(
                 "Topic history is not a JSON array. "
                 "Starting fresh."
             )
+
             return []
+
 
         print(
             f"Loaded {len(data)} previous published topics."
         )
 
+
         return data
 
+
     except (json.JSONDecodeError, OSError) as exc:
+
         print(
             f"Could not read topic history: {exc}"
         )
-        print("Starting with empty topic history.")
+
+        print(
+            "Starting with empty topic history."
+        )
+
         return []
 
 
@@ -120,7 +180,9 @@ def save_history(history):
         exist_ok=True
     )
 
+
     history = history[-MAX_HISTORY:]
+
 
     HISTORY_FILE.write_text(
         json.dumps(
@@ -141,7 +203,10 @@ def get_trending_articles():
     Fetch currently rising DEV.to articles.
     """
 
-    print("Fetching DEV.to rising articles...")
+    print(
+        "Fetching DEV.to rising articles..."
+    )
+
 
     response = requests.get(
         DEVTO_ARTICLES,
@@ -155,13 +220,17 @@ def get_trending_articles():
         timeout=30
     )
 
+
     response.raise_for_status()
 
+
     articles = response.json()
+
 
     print(
         f"Found {len(articles)} rising DEV.to articles."
     )
+
 
     return articles
 
@@ -178,12 +247,17 @@ def prepare_topics(articles):
 
     topics = []
 
+
     for article in articles:
+
         topics.append(
             {
                 "title": article.get("title"),
                 "description": article.get("description"),
-                "tags": article.get("tag_list", []),
+                "tags": article.get(
+                    "tag_list",
+                    []
+                ),
                 "reactions": article.get(
                     "positive_reactions_count",
                     0
@@ -198,6 +272,7 @@ def prepare_topics(articles):
             }
         )
 
+
     return topics
 
 
@@ -208,17 +283,20 @@ def prepare_topics(articles):
 def build_prompt(topics, history):
 
     # Keep prompt reasonably small.
+
     topic_text = json.dumps(
         topics,
         indent=2,
         ensure_ascii=False
     )
 
+
     history_text = json.dumps(
         history[-MAX_HISTORY_FOR_PROMPT:],
         indent=2,
         ensure_ascii=False
     )
+
 
     return f"""
 You are an experienced Staff Software Engineer and
@@ -404,21 +482,29 @@ systemdesign
 webdev
 
 ============================================================
-OUTPUT FORMAT
+ARTICLE BODY
 ============================================================
 
-Return ONLY valid JSON.
+The body_markdown field must contain the complete
+publish-ready Markdown article.
 
-Do not wrap the JSON in Markdown fences.
+The body may contain:
 
-Use EXACTLY this structure:
+- Markdown headings
+- Markdown lists
+- Markdown tables
+- fenced code blocks
+- Mermaid diagrams
+- inline code
+- quotes
+- JSON examples
+- TypeScript examples
 
-{{
-  "title": "...",
-  "description": "...",
-  "tags": ["...", "...", "..."],
-  "body_markdown": "..."
-}}
+Do not put the article inside another JSON object.
+Do not add commentary outside the requested fields.
+
+Return the article using the configured structured JSON
+response format.
 """
 
 
@@ -435,58 +521,81 @@ def generate_with_retry(prompt):
 
     last_error = None
 
+
     for model in GEMINI_MODELS:
 
-        for attempt in range(1, MAX_RETRIES_PER_MODEL + 1):
+        for attempt in range(
+            1,
+            MAX_RETRIES_PER_MODEL + 1
+        ):
 
             try:
+
                 print(
                     f"Calling Gemini: "
                     f"{model} "
                     f"(attempt {attempt}/{MAX_RETRIES_PER_MODEL})"
                 )
 
+
                 response = client.models.generate_content(
                     model=model,
                     contents=prompt,
-                    config={
-                        "temperature": 0.8,
-                        "response_mime_type": "application/json",
-                    },
+                    config=types.GenerateContentConfig(
+                        temperature=0.8,
+                        response_mime_type="application/json",
+                        response_schema=ARTICLE_SCHEMA,
+                    ),
                 )
 
-                if not response or not response.text:
+
+                if not response:
+
                     raise RuntimeError(
                         "Gemini returned an empty response."
                     )
+
 
                 print(
                     f"Gemini generation succeeded using {model}."
                 )
 
-                return response.text
+
+                return response
+
 
             except errors.ServerError as exc:
+
                 last_error = exc
+
 
                 print(
                     f"Gemini returned server error "
                     f"{getattr(exc, 'code', 'unknown')}: {exc}"
                 )
 
+
                 if attempt < MAX_RETRIES_PER_MODEL:
 
                     # 10s, 20s, 40s
-                    delay = 10 * (2 ** (attempt - 1))
+
+                    delay = 10 * (
+                        2 ** (attempt - 1)
+                    )
+
 
                     print(
                         f"Retrying in {delay} seconds..."
                     )
 
+
                     time.sleep(delay)
 
+
             except errors.APIError as exc:
+
                 last_error = exc
+
 
                 status_code = getattr(
                     exc,
@@ -494,12 +603,15 @@ def generate_with_retry(prompt):
                     None
                 )
 
+
                 print(
                     f"Gemini API error "
                     f"{status_code}: {exc}"
                 )
 
+
                 # Only retry likely temporary errors.
+
                 retryable = status_code in {
                     429,
                     500,
@@ -508,34 +620,49 @@ def generate_with_retry(prompt):
                     504
                 }
 
-                if retryable and attempt < MAX_RETRIES_PER_MODEL:
 
-                    delay = 10 * (2 ** (attempt - 1))
+                if (
+                    retryable
+                    and attempt < MAX_RETRIES_PER_MODEL
+                ):
+
+                    delay = 10 * (
+                        2 ** (attempt - 1)
+                    )
+
 
                     print(
                         f"Retrying in {delay} seconds..."
                     )
 
+
                     time.sleep(delay)
 
                 else:
+
                     break
 
+
             except Exception as exc:
+
                 print(
                     f"Unexpected Gemini error: "
                     f"{type(exc).__name__}: {exc}"
                 )
+
                 raise
+
 
         print(
             f"Model {model} failed after "
             f"{MAX_RETRIES_PER_MODEL} attempts."
         )
 
+
         print(
             "Trying fallback model..."
         )
+
 
     raise RuntimeError(
         "All Gemini models failed."
@@ -543,27 +670,139 @@ def generate_with_retry(prompt):
 
 
 # ============================================================
-# RESPONSE CLEANUP
+# RESPONSE PARSING
 # ============================================================
 
 def clean_json_response(text):
     """
-    Remove common Markdown code fencing accidentally returned
-    by the model.
+    Normalize accidental Markdown fences around JSON.
     """
 
-    text = text.strip()
+    text = (
+        text or ""
+    ).strip()
+
 
     if text.startswith("```json"):
-        text = text[len("```json"):].strip()
+
+        text = text[7:].strip()
+
 
     elif text.startswith("```"):
+
         text = text[3:].strip()
 
+
     if text.endswith("```"):
+
         text = text[:-3].strip()
 
+
     return text
+
+
+def parse_article_response(response):
+    """
+    Prefer the SDK's structured response.
+
+    Fall back to response.text for compatibility with SDK
+    versions that do not expose response.parsed.
+    """
+
+    parsed = getattr(
+        response,
+        "parsed",
+        None
+    )
+
+
+    if parsed is not None:
+
+        if hasattr(
+            parsed,
+            "model_dump"
+        ):
+
+            return parsed.model_dump()
+
+
+        if hasattr(
+            parsed,
+            "dict"
+        ):
+
+            return parsed.dict()
+
+
+        if isinstance(
+            parsed,
+            dict
+        ):
+
+            return parsed
+
+
+    raw_text = getattr(
+        response,
+        "text",
+        None
+    )
+
+
+    if not raw_text:
+
+        raise ValueError(
+            "Gemini returned an empty response."
+        )
+
+
+    text = clean_json_response(
+        raw_text
+    )
+
+
+    try:
+
+        return json.loads(text)
+
+
+    except json.JSONDecodeError as exc:
+
+        start = max(
+            0,
+            exc.pos - 300
+        )
+
+
+        end = min(
+            len(text),
+            exc.pos + 300
+        )
+
+
+        print(
+            "Gemini response could not be parsed as JSON."
+        )
+
+
+        print(
+            f"JSON error: {exc}"
+        )
+
+
+        print(
+            "Problematic response section:"
+        )
+
+
+        print(
+            text[start:end]
+        )
+
+
+        raise ValueError(
+            "Gemini response could not be parsed as JSON."
+        ) from exc
 
 
 # ============================================================
@@ -577,46 +816,88 @@ def generate_article(topics, history):
         history
     )
 
-    print("Generating article with Gemini...")
 
-    raw_text = generate_with_retry(prompt)
+    print(
+        "Generating article with Gemini..."
+    )
 
-    text = clean_json_response(raw_text)
 
-    try:
-        article = json.loads(text)
+    last_error = None
 
-    except json.JSONDecodeError as exc:
 
-        print(
-            "Gemini returned invalid JSON."
-        )
+    for attempt in range(
+        1,
+        MAX_ARTICLE_GENERATION_ATTEMPTS + 1
+    ):
 
-        print(
-            "Raw response:"
-        )
+        try:
 
-        print(text)
-
-        raise ValueError(
-            "Gemini response could not be parsed as JSON."
-        ) from exc
-
-    required_fields = [
-        "title",
-        "description",
-        "tags",
-        "body_markdown"
-    ]
-
-    for field in required_fields:
-
-        if field not in article:
-            raise ValueError(
-                f"Generated article is missing: {field}"
+            print(
+                f"Article generation attempt "
+                f"{attempt}/"
+                f"{MAX_ARTICLE_GENERATION_ATTEMPTS}"
             )
 
-    return article
+
+            response = generate_with_retry(
+                prompt
+            )
+
+
+            article = parse_article_response(
+                response
+            )
+
+
+            required_fields = [
+                "title",
+                "description",
+                "tags",
+                "body_markdown"
+            ]
+
+
+            for field in required_fields:
+
+                if field not in article:
+
+                    raise ValueError(
+                        f"Generated article is missing: "
+                        f"{field}"
+                    )
+
+
+            return article
+
+
+        except ValueError as exc:
+
+            last_error = exc
+
+
+            print(
+                f"Article generation/parsing failed: "
+                f"{exc}"
+            )
+
+
+            if (
+                attempt
+                < MAX_ARTICLE_GENERATION_ATTEMPTS
+            ):
+
+                print(
+                    "Retrying article generation..."
+                )
+
+
+                time.sleep(2)
+
+
+    raise RuntimeError(
+        "Gemini failed to produce a valid article after "
+        f"{MAX_ARTICLE_GENERATION_ATTEMPTS} attempts."
+    ) from last_error
 
 
 # ============================================================
@@ -625,102 +906,198 @@ def generate_article(topics, history):
 
 def validate_article(article):
 
-    if not isinstance(article, dict):
+    if not isinstance(
+        article,
+        dict
+    ):
+
         raise ValueError(
             "Generated article is not an object."
         )
 
-    title = article.get("title")
 
-    description = article.get("description")
+    title = article.get(
+        "title"
+    )
 
-    tags = article.get("tags")
 
-    body = article.get("body_markdown")
+    description = article.get(
+        "description"
+    )
 
-    if not isinstance(title, str):
+
+    tags = article.get(
+        "tags"
+    )
+
+
+    body = article.get(
+        "body_markdown"
+    )
+
+
+    if not isinstance(
+        title,
+        str
+    ):
+
         raise ValueError(
             "Article title must be a string."
         )
 
-    if not isinstance(description, str):
+
+    if not isinstance(
+        description,
+        str
+    ):
+
         raise ValueError(
             "Article description must be a string."
         )
 
-    if not isinstance(body, str):
+
+    if not isinstance(
+        body,
+        str
+    ):
+
         raise ValueError(
             "Article body must be a string."
         )
 
-    if not isinstance(tags, list):
+
+    if not isinstance(
+        tags,
+        list
+    ):
+
         raise ValueError(
             "Article tags must be an array."
         )
+
 
     title = title.strip()
     description = description.strip()
     body = body.strip()
 
+
     if len(title) < 10:
+
         raise ValueError(
             "Article title is suspiciously short."
         )
 
+
     if len(description) < 20:
+
         raise ValueError(
             "Article description is suspiciously short."
         )
 
+
     if len(body) < MIN_ARTICLE_LENGTH:
+
         raise ValueError(
             f"Article body is too short "
             f"({len(body)} characters)."
         )
 
+
     # Keep maximum of five tags.
+
     tags = tags[:5]
+
 
     cleaned_tags = []
 
+
     for tag in tags:
 
-        if not isinstance(tag, str):
+        if not isinstance(
+            tag,
+            str
+        ):
+
             continue
+
 
         tag = tag.strip().lower()
 
+
         # DEV.to-friendly tags only.
-        if not re.fullmatch(r"[a-z0-9]+", tag):
+
+        if not re.fullmatch(
+            r"[a-z0-9]+",
+            tag
+        ):
+
             continue
 
+
         if tag not in cleaned_tags:
-            cleaned_tags.append(tag)
+
+            cleaned_tags.append(
+                tag
+            )
+
 
     if not cleaned_tags:
+
         raise ValueError(
             "Article has no valid DEV.to tags."
         )
 
+
     article["title"] = title
+
     article["description"] = description
+
     article["body_markdown"] = body
+
     article["tags"] = cleaned_tags[:5]
 
-    print()
-    print("Article validation passed.")
-    print()
-    print("TITLE:")
-    print(title)
-    print()
-    print("DESCRIPTION:")
-    print(description)
-    print()
-    print("TAGS:")
-    print(", ".join(article["tags"]))
+
     print()
     print(
-        f"BODY LENGTH: {len(body)} characters"
+        "Article validation passed."
+    )
+    print()
+
+
+    print(
+        "TITLE:"
+    )
+
+    print(title)
+
+    print()
+
+
+    print(
+        "DESCRIPTION:"
+    )
+
+    print(description)
+
+    print()
+
+
+    print(
+        "TAGS:"
+    )
+
+    print(
+        ", ".join(
+            article["tags"]
+        )
+    )
+
+    print()
+
+
+    print(
+        f"BODY LENGTH: "
+        f"{len(body)} characters"
     )
 
 
@@ -728,9 +1105,15 @@ def validate_article(article):
 # DUPLICATE CHECK
 # ============================================================
 
-def is_duplicate_title(title, history):
+def is_duplicate_title(
+    title,
+    history
+):
 
-    normalized_title = title.strip().lower()
+    normalized_title = (
+        title.strip().lower()
+    )
+
 
     for item in history:
 
@@ -739,12 +1122,18 @@ def is_duplicate_title(title, history):
             ""
         )
 
+
         if (
-            isinstance(previous_title, str)
+            isinstance(
+                previous_title,
+                str
+            )
             and previous_title.strip().lower()
             == normalized_title
         ):
+
             return True
+
 
     return False
 
@@ -765,8 +1154,12 @@ def publish_article(article):
         }
     }
 
+
     print()
-    print("Publishing article to DEV.to...")
+    print(
+        "Publishing article to DEV.to..."
+    )
+
 
     response = requests.post(
         DEVTO_ARTICLES,
@@ -778,37 +1171,62 @@ def publish_article(article):
         timeout=60
     )
 
-    if response.status_code not in (200, 201):
+
+    if response.status_code not in (
+        200,
+        201
+    ):
 
         print(
             f"DEV.to API error: "
             f"{response.status_code}"
         )
 
-        print(response.text)
+
+        print(
+            response.text
+        )
+
 
         sys.exit(1)
 
+
     result = response.json()
 
+
     print()
-    print("========================================")
-    print("ARTICLE PUBLISHED")
-    print("========================================")
+    print(
+        "========================================"
+    )
+
+    print(
+        "ARTICLE PUBLISHED"
+    )
+
+    print(
+        "========================================"
+    )
+
 
     print(
         f"Title: {result.get('title')}"
     )
 
+
     print(
         f"URL:   {result.get('url')}"
     )
+
 
     print(
         f"ID:    {result.get('id')}"
     )
 
-    print("========================================")
+
+    print(
+        "========================================"
+    )
+
 
     return result
 
@@ -823,15 +1241,19 @@ def main():
         "========================================"
     )
 
+
     print(
         "      DAILY DEV.TO AUTO PUBLISHER"
     )
+
 
     print(
         "========================================"
     )
 
+
     print()
+
 
     # --------------------------------------------------------
     # Load history
@@ -839,20 +1261,25 @@ def main():
 
     history = load_history()
 
+
     # --------------------------------------------------------
     # Get current DEV.to trends
     # --------------------------------------------------------
 
     articles = get_trending_articles()
 
+
     if not articles:
+
         raise RuntimeError(
             "DEV.to returned no rising articles."
         )
 
+
     topics = prepare_topics(
         articles
     )
+
 
     # --------------------------------------------------------
     # Generate article
@@ -863,6 +1290,7 @@ def main():
         history
     )
 
+
     # --------------------------------------------------------
     # Validate article
     # --------------------------------------------------------
@@ -870,6 +1298,7 @@ def main():
     validate_article(
         article
     )
+
 
     # --------------------------------------------------------
     # Avoid exact duplicate titles
@@ -879,10 +1308,12 @@ def main():
         article["title"],
         history
     ):
+
         raise RuntimeError(
             "Generated article title already exists "
             "in topic history. Refusing to publish."
         )
+
 
     # --------------------------------------------------------
     # Publish
@@ -891,6 +1322,7 @@ def main():
     result = publish_article(
         article
     )
+
 
     # --------------------------------------------------------
     # Save history ONLY after successful publish
@@ -905,14 +1337,19 @@ def main():
         }
     )
 
+
     save_history(
         history
     )
 
+
     print()
+
+
     print(
         "Topic history updated successfully."
     )
+
 
     print(
         "Daily DEV.to publishing completed."
@@ -924,32 +1361,75 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     try:
+
         main()
 
+
     except KeyboardInterrupt:
+
         print()
+
         print(
             "Execution interrupted."
         )
+
         sys.exit(130)
 
+
     except Exception as exc:
+
         print()
+
         print(
             "========================================"
         )
+
+
         print(
             "WORKFLOW FAILED"
         )
-        print(
-            "========================================"
-        )
-        print(
-            f"{type(exc).__name__}: {exc}"
-        )
+
+
         print(
             "========================================"
         )
 
+
+        print(
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+        print(
+            "========================================"
+        )
+
+
         sys.exit(1)
+````
+
+### Also change the GitHub Actions dependency
+
+Your current workflow installs `google-genai` without explicitly upgrading it. Change that step to:
+
+```yaml
+- name: Install dependencies
+  run: |
+    python -m pip install --upgrade pip
+    python -m pip install --upgrade requests google-genai
+```
+
+The important changes are:
+
+1. **`response_schema` added** — so Gemini is constrained to the exact four fields.
+2. **`response.parsed` supported** — the SDK can parse structured output for us.
+3. **`response.text` remains as a compatibility fallback.**
+4. **Article-level retry added** — malformed output doesn't immediately kill the workflow.
+5. **Your existing 503 model fallback remains intact.**
+6. **The giant JSON example was removed from the prompt**, reducing the chance of the model fighting with JSON escaping.
+
+Google's documentation confirms that `generate_content` supports `response_mime_type` + `response_schema`, and the newer SDK can expose the parsed structured result.
+
+**One thing I would do before the next scheduled run:** manually trigger the GitHub Action once. If it fails again, the new logging will tell us whether the failure is Gemini availability, structured-output configuration, validation, or DEV.to publishing—rather than dumping an enormous ambiguous JSON response.
