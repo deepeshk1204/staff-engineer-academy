@@ -29,6 +29,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --upgrade requests google-genai
 
+      - name: Validate Python script
+        run: |
+          python -m py_compile scripts/generate_and_publish.py
+
       - name: Generate and publish article
         env:
           DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
