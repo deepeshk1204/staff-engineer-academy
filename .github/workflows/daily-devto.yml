@@ -34,7 +34,7 @@ jobs:
           DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          python scripts/generate_and_publish.py
+          python -u scripts/generate_and_publish.py
 
       - name: Commit topic history
         run: |
